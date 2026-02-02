@@ -27,7 +27,7 @@ function getPageTitle(page) {
     return '제목 없음';
 }
 
-// 1. 노션 데이터베이스 목록 조회
+// 1. 노션 데이터베이스 목록 조회 (온보딩 시 사용)
 app.post('/api/notion/databases', async (req, res) => {
     try {
         const notion = new Client({ auth: req.body.token });
@@ -43,7 +43,7 @@ app.post('/api/notion/databases', async (req, res) => {
     }
 });
 
-// 2. 일정 조회
+// 2. 캘린더 일정 조회 (위젯 렌더링 시 사용)
 app.post('/api/notion/events', async (req, res) => {
     const { token, dbId } = req.body;
     const notion = new Client({ auth: token });
@@ -56,6 +56,8 @@ app.post('/api/notion/events', async (req, res) => {
         const events = response.results.map(page => {
             const props = page.properties;
             const dateProp = props.Date?.date;
+
+            // 날짜/시간 파싱
             const startStr = dateProp?.start || '';
             const endStr = dateProp?.end || '';
 
@@ -88,18 +90,29 @@ app.post('/api/notion/events', async (req, res) => {
     }
 });
 
-// 3. 일정 추가
+// 3. 새로운 일정 추가 (위젯에서 직접 입력 시 사용)
 app.post('/api/notion/add-event', async (req, res) => {
-    const { token, dbId, title, date, category } = req.body;
+    const { token, dbId, title, date, startTime, endTime, category } = req.body;
     const notion = new Client({ auth: token });
     try {
+        // 제목 속성 이름 동적으로 찾기
         const titlePropName = await getTitlePropertyName(notion, dbId);
+
+        // 날짜/시간 구성
+        const startDateTime = startTime ? `${date}T${startTime}:00` : date;
+        const endDateTime = endTime ? `${date}T${endTime}:00` : null;
+
+        const dateProperty = { start: startDateTime };
+        if (endDateTime) {
+            dateProperty.end = endDateTime;
+        }
 
         const properties = {
             [titlePropName]: { title: [{ text: { content: title } }] },
-            "Date": { date: { start: date } }
+            "Date": { date: dateProperty }
         };
 
+        // 카테고리가 있으면 추가
         if (category) {
             properties["Category"] = { multi_select: [{ name: category }] };
         }
@@ -114,7 +127,7 @@ app.post('/api/notion/add-event', async (req, res) => {
     }
 });
 
-// 4. 카테고리 조회
+// 4. 카테고리 목록 조회
 app.post('/api/notion/categories', async (req, res) => {
     const { token, dbId } = req.body;
     const notion = new Client({ auth: token });
@@ -122,6 +135,7 @@ app.post('/api/notion/categories', async (req, res) => {
         const database = await notion.databases.retrieve({ database_id: dbId });
         const categoryProp = database.properties.Category;
 
+        // multi_select 또는 select 타입 지원
         let categories = [];
         if (categoryProp?.multi_select?.options) {
             categories = categoryProp.multi_select.options.map(opt => opt.name);
@@ -137,52 +151,71 @@ app.post('/api/notion/categories', async (req, res) => {
 
 // 5. 일정 수정
 app.post('/api/notion/update-event', async (req, res) => {
-    const { token, dbId, taskId, title, date, category } = req.body;
+    const { token, dbId, taskId, title, date, startTime, endTime, category } = req.body;
     const notion = new Client({ auth: token });
     try {
         const properties = {};
 
         if (title) {
+            // 제목 속성 이름 동적으로 찾기
             const titlePropName = await getTitlePropertyName(notion, dbId);
             properties[titlePropName] = { title: [{ text: { content: title } }] };
         }
         if (date) {
-            properties["Date"] = { date: { start: date } };
+            // 날짜/시간 구성
+            const startDateTime = startTime ? `${date}T${startTime}:00` : date;
+            const endDateTime = endTime ? `${date}T${endTime}:00` : null;
+
+            const dateProperty = { start: startDateTime };
+            if (endDateTime) {
+                dateProperty.end = endDateTime;
+            }
+            properties["Date"] = { date: dateProperty };
         }
         if (category) {
             properties["Category"] = { multi_select: [{ name: category }] };
         }
 
-        await notion.pages.update({ page_id: taskId, properties });
+        await notion.pages.update({
+            page_id: taskId,
+            properties
+        });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: "일정 수정 실패: " + e.message });
     }
 });
 
-// 6. 일정 삭제
+// 6. 일정 삭제 (아카이브 처리)
 app.post('/api/notion/delete-event', async (req, res) => {
     const { token, taskId } = req.body;
     const notion = new Client({ auth: token });
     try {
-        await notion.pages.update({ page_id: taskId, archived: true });
+        await notion.pages.update({
+            page_id: taskId,
+            archived: true
+        });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: "일정 삭제 실패: " + e.message });
     }
 });
 
-// 7. 중요 표시 토글
+// 7. 중요 표시 토글 (Priority)
 app.post('/api/notion/toggle-star', async (req, res) => {
     const { token, taskId } = req.body;
     const notion = new Client({ auth: token });
     try {
+        // 현재 상태 조회
         const page = await notion.pages.retrieve({ page_id: taskId });
         const currentPriority = page.properties.Priority?.checkbox || false;
 
+        // 토글
         await notion.pages.update({
             page_id: taskId,
-            properties: { "Priority": { checkbox: !currentPriority } }
+            properties: {
+                "Priority": { checkbox: !currentPriority }
+            }
         });
         res.json({ success: true, priority: !currentPriority });
     } catch (e) {
@@ -190,17 +223,21 @@ app.post('/api/notion/toggle-star', async (req, res) => {
     }
 });
 
-// 8. 완료 표시 토글
+// 8. 완료 표시 토글 (Done)
 app.post('/api/notion/complete', async (req, res) => {
     const { token, taskId } = req.body;
     const notion = new Client({ auth: token });
     try {
+        // 현재 상태 조회
         const page = await notion.pages.retrieve({ page_id: taskId });
         const currentDone = page.properties.Done?.checkbox || false;
 
+        // 토글
         await notion.pages.update({
             page_id: taskId,
-            properties: { "Done": { checkbox: !currentDone } }
+            properties: {
+                "Done": { checkbox: !currentDone }
+            }
         });
         res.json({ success: true, done: !currentDone });
     } catch (e) {
@@ -208,29 +245,49 @@ app.post('/api/notion/complete', async (req, res) => {
     }
 });
 
-// 9. 일정 미루기
+// 9. 일정 미루기 (다음날로)
 app.post('/api/notion/postpone', async (req, res) => {
     const { token, taskId } = req.body;
     const notion = new Client({ auth: token });
     try {
+        // 현재 날짜 조회
         const page = await notion.pages.retrieve({ page_id: taskId });
-        const currentDate = page.properties.Date?.date?.start;
+        const dateProp = page.properties.Date?.date;
+        const currentStart = dateProp?.start;
+        const currentEnd = dateProp?.end;
 
-        if (!currentDate) {
+        if (!currentStart) {
             return res.status(400).json({ error: "날짜가 설정되지 않은 일정입니다." });
         }
 
-        const date = new Date(currentDate);
-        date.setDate(date.getDate() + 1);
-        const newDate = date.toISOString().split('T')[0];
+        // 하루 뒤로 미루기
+        const startDate = new Date(currentStart);
+        startDate.setDate(startDate.getDate() + 1);
+        const newStartDate = startDate.toISOString().split('T')[0];
 
-        const newStart = currentDate.includes('T')
-            ? newDate + 'T' + currentDate.split('T')[1]
-            : newDate;
+        // 시간 정보가 있었으면 유지
+        const newStart = currentStart.includes('T')
+            ? newStartDate + 'T' + currentStart.split('T')[1]
+            : newStartDate;
+
+        const dateProperty = { start: newStart };
+
+        // 종료 시간도 있으면 같이 미루기
+        if (currentEnd) {
+            const endDate = new Date(currentEnd);
+            endDate.setDate(endDate.getDate() + 1);
+            const newEndDate = endDate.toISOString().split('T')[0];
+            const newEnd = currentEnd.includes('T')
+                ? newEndDate + 'T' + currentEnd.split('T')[1]
+                : newEndDate;
+            dateProperty.end = newEnd;
+        }
 
         await notion.pages.update({
             page_id: taskId,
-            properties: { "Date": { date: { start: newStart } } }
+            properties: {
+                "Date": { date: dateProperty }
+            }
         });
         res.json({ success: true, newDate: newStart });
     } catch (e) {
