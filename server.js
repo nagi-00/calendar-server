@@ -198,6 +198,90 @@ app.post('/api/notion/categories', async (req, res) => {
     }
 });
  
+// 4-1. 카테고리 이름 변경
+app.post('/api/notion/rename-category', async (req, res) => {
+    const { token, dbId, oldName, newName } = req.body;
+    const notion = new Client({ auth: token });
+    try {
+        const database = await notion.databases.retrieve({ database_id: dbId });
+        const categoryProp = database.properties.Category;
+
+        let options = [];
+        if (categoryProp?.multi_select?.options) {
+            options = categoryProp.multi_select.options.map(opt =>
+                opt.name === oldName ? { ...opt, name: newName } : opt
+            );
+        }
+
+        await notion.databases.update({
+            database_id: dbId,
+            properties: {
+                "Category": { multi_select: { options } }
+            }
+        });
+
+        const response = await notion.databases.query({
+            database_id: dbId,
+            filter: { property: "Category", multi_select: { contains: oldName } }
+        });
+
+        for (const page of response.results) {
+            const currentCategories = page.properties.Category?.multi_select || [];
+            const updatedCategories = currentCategories.map(cat =>
+                cat.name === oldName ? { name: newName } : { name: cat.name }
+            );
+            await notion.pages.update({
+                page_id: page.id,
+                properties: { "Category": { multi_select: updatedCategories } }
+            });
+        }
+
+        res.json({ success: true, updated: response.results.length });
+    } catch (e) {
+        res.status(500).json({ error: "카테고리 이름 변경 실패: " + e.message });
+    }
+});
+
+// 4-2. 카테고리 삭제
+app.post('/api/notion/delete-category', async (req, res) => {
+    const { token, dbId, categoryName } = req.body;
+    const notion = new Client({ auth: token });
+    try {
+        const database = await notion.databases.retrieve({ database_id: dbId });
+        const categoryProp = database.properties.Category;
+
+        let options = [];
+        if (categoryProp?.multi_select?.options) {
+            options = categoryProp.multi_select.options.filter(opt => opt.name !== categoryName);
+        }
+
+        await notion.databases.update({
+            database_id: dbId,
+            properties: { "Category": { multi_select: { options } } }
+        });
+
+        const response = await notion.databases.query({
+            database_id: dbId,
+            filter: { property: "Category", multi_select: { contains: categoryName } }
+        });
+
+        for (const page of response.results) {
+            const currentCategories = page.properties.Category?.multi_select || [];
+            const updatedCategories = currentCategories
+                .filter(cat => cat.name !== categoryName)
+                .map(cat => ({ name: cat.name }));
+            await notion.pages.update({
+                page_id: page.id,
+                properties: { "Category": { multi_select: updatedCategories } }
+            });
+        }
+
+        res.json({ success: true, updated: response.results.length });
+    } catch (e) {
+        res.status(500).json({ error: "카테고리 삭제 실패: " + e.message });
+    }
+});
+
 // 5. 일정 수정
 app.post('/api/notion/update-event', async (req, res) => {
     const { token, dbId, taskId, title, date, startTime, endTime, category, isRoutine, repeatDays } = req.body;
